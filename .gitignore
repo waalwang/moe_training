@@ -1,0 +1,37 @@
+# Data files
+data/*.parquet
+data/*.csv
+data/*.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Training artifacts
+*.pt
+*.bin
+*.safetensors
+wandb/
+outputs/
+checkpoints/
+logs/
