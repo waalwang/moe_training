@@ -3,7 +3,6 @@
 
 model:
   name: "google/gemma-4-26b-A4B-it"
-  max_length: 2048
 
 # QLoRA config -- attention-only targets for MoE backbone.
 # Expert FFN weights are packed nn.Parameters (not nn.Linear), so LoRA
@@ -53,7 +52,7 @@ data:
   seed: 42
   min_chain_depth: 3
   min_total_score: 0.0
-  weight_beta: 0.3
+  weight_beta: 0 # do a simple sft first
   weight_mode: "gate_amplify"
   weight_floor: 0.1
   weight_max: 2.0
@@ -81,7 +80,7 @@ profiles:
     full_finetune: false
     attn_implementation: "sdpa"
     gradient_checkpointing: true
-    max_length: 2048
+    max_length: 4096
 
   cloud_full:
     # Full FT 26B -- needs multi-GPU or very large VRAM
@@ -128,6 +127,5 @@ training:
   eval_strategy: "steps"
   save_total_limit: 3
   report_to: "wandb"
-  run_name: "gemma4-26b-weighted-sft"
-  max_length: 2048
+  run_name: "gemma4-26b-sft"
   dataset_num_proc: 16

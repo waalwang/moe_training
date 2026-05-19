@@ -1,7 +1,5 @@
 # Data files
-data/*.parquet
-data/*.csv
-data/*.jsonl
+data/
 
 # Python
 __pycache__/
