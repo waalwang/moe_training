@@ -2,7 +2,8 @@
 # ----------------------------------
 
 model:
-  name: "google/gemma-4-26b-A4B-it"
+  # name: "google/gemma-4-26b-A4B-it"  # MoE -- expert FFN weights unquantizable, needs multi-GPU
+  name: "google/gemma-3-27b-it"
 
 # QLoRA config -- attention-only targets for MoE backbone.
 # Expert FFN weights are packed nn.Parameters (not nn.Linear), so LoRA
@@ -13,6 +14,8 @@ qlora:
   lora_alpha: 128
   lora_dropout: 0.05
   target_modules:
+    # gemma-3: plain nn.Linear, no wrapper
+    # gemma-4 MoE: use "q_proj.linear" etc. (Gemma4ClippableLinear wrapper)
     - "q_proj"
     - "k_proj"
     - "v_proj"
@@ -71,16 +74,16 @@ profiles:
     max_length: 1024
 
   cloud:
-    # QLoRA on MoE 26B, RTX PRO 6000 WS 96GB
-    # 26B params in 4-bit ~ 14GB weights + LoRA adapters + activations
-    per_device_train_batch_size: 2
-    gradient_accumulation_steps: 8
+    # QLoRA gemma-3-27b, RTX PRO 6000 WS 96GB
+    # 27B dense in 4-bit ~ 14GB weights, ~80GB headroom for activations
+    per_device_train_batch_size: 8
+    gradient_accumulation_steps: 2
     bf16: true
     fp16: false
     full_finetune: false
     attn_implementation: "sdpa"
     gradient_checkpointing: true
-    max_length: 4096
+    max_length: 2048
 
   cloud_full:
     # Full FT 26B -- needs multi-GPU or very large VRAM
@@ -117,15 +120,17 @@ dpo:
 training:
   output_dir: "outputs/sft"
   num_train_epochs: 2
-  learning_rate: 2.0e-5
+  learning_rate: 1.0e-4
   warmup_ratio: 0.05
   weight_decay: 0.01
   lr_scheduler_type: "cosine_with_restarts"
+  lr_scheduler_kwargs:
+    num_cycles: 3
   logging_steps: 10
   save_steps: 2000
   eval_steps: 2000
   eval_strategy: "steps"
-  save_total_limit: 3
+  save_total_limit: 5
   report_to: "wandb"
   run_name: "gemma4-26b-sft"
   dataset_num_proc: 16

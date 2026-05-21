@@ -92,6 +92,7 @@ def build_training_args(cfg: dict) -> SFTConfig:
         warmup_ratio=t.get("warmup_ratio", 0.05),
         weight_decay=t["weight_decay"],
         lr_scheduler_type=t["lr_scheduler_type"],
+        lr_scheduler_kwargs=t.get("lr_scheduler_kwargs"),
         bf16=t["bf16"],
         fp16=t["fp16"],
         gradient_checkpointing=t["gradient_checkpointing"],

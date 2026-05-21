@@ -83,34 +83,37 @@ class WeightedSFTTrainer(SFTTrainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         turn_weights = inputs.pop("turn_weights", None)
+        labels = inputs["labels"]
 
+        # Do NOT pass labels to model -- transformers' internal loss casts
+        # logits to float32 (logits.float()), which spikes VRAM by ~4-8 GB.
+        # We compute loss ourselves in bf16 below.
         outputs = model(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
-            labels=inputs["labels"],
+            use_cache=False,
         )
 
         logits = outputs.logits
-        labels = inputs["labels"]
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
         mask = shift_labels != -100
 
-        if turn_weights is None:
-            loss = outputs.loss
-        else:
+        if turn_weights is not None:
             token_w = _build_token_weights(shift_labels, turn_weights)
             token_w = token_w.to(shift_logits.device, dtype=shift_logits.dtype)
+        else:
+            token_w = mask.to(dtype=shift_logits.dtype)
 
-            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
-            per_token_loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-            )
-            per_token_loss = per_token_loss.view(shift_labels.size())
+        loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+        per_token_loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+        )
+        per_token_loss = per_token_loss.view(shift_labels.size())
 
-            weighted_loss = per_token_loss * token_w
-            loss = weighted_loss.sum() / token_w.sum().clamp(min=1)
+        weighted_loss = per_token_loss * token_w
+        loss = weighted_loss.sum() / token_w.sum().clamp(min=1)
 
         with torch.no_grad():
             preds = shift_logits.argmax(dim=-1)

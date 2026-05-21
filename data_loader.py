@@ -47,6 +47,44 @@ def _compute_turn_weights(
     return weights
 
 
+def _normalize_turns(turns: list[dict]) -> list[dict]:
+    """Normalize turns for strict user/assistant alternation (Gemma3 requirement).
+
+    - system turns: prepend content to the next user turn.
+    - consecutive same-role turns: merge content; average score/attunement_score.
+    - returns [] if result doesn't start with 'user'.
+    """
+    result = []
+    pending_system: list[str] = []
+
+    for t in turns:
+        role = t["role"]
+        if role == "system":
+            pending_system.append(t["content"])
+            continue
+
+        entry = dict(t)
+        if pending_system and role == "user":
+            entry["content"] = "\n\n".join(pending_system) + "\n\n" + t["content"]
+            pending_system = []
+
+        if result and result[-1]["role"] == role:
+            prev = result[-1]
+            prev["content"] += "\n\n" + entry["content"]
+            for field in ("score", "attunement_score"):
+                pv, ev = prev.get(field), entry.get(field)
+                if pv is not None and ev is not None:
+                    prev[field] = (pv + ev) / 2
+        else:
+            result.append(entry)
+
+    if not result:
+        return []
+    if result[0]["role"] != "user":
+        result.insert(0, {"role": "user", "content": ""})
+    return result
+
+
 def _load_shard(
     path: str,
     weight_beta: float,
@@ -62,6 +100,7 @@ def _load_shard(
     n = table.num_rows
 
     rows = []
+    skipped = 0
     for i in range(n):
         chain_depth = data["chain_depth"][i]
         total_score = data["total_score"][i]
@@ -70,7 +109,11 @@ def _load_shard(
         if total_score < min_total_score:
             continue
 
-        turns = json.loads(data["turns"][i])
+        raw_turns = json.loads(data["turns"][i])
+        turns = _normalize_turns(raw_turns)
+        if not turns:
+            skipped += 1
+            continue
         messages = [{"role": t["role"], "content": t["content"]} for t in turns]
         turn_weights = _compute_turn_weights(
             turns, weight_beta, weight_mode, weight_floor,
@@ -81,7 +124,7 @@ def _load_shard(
             "turn_weights": turn_weights,
         })
 
-    logger.info("  %s: %d total, %d kept", os.path.basename(path), n, len(rows))
+    logger.info("  %s: %d total, %d kept, %d skipped (bad role order)", os.path.basename(path), n, len(rows), skipped)
     return rows
 
 

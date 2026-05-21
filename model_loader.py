@@ -73,6 +73,53 @@ def _load_and_merge_adapter(checkpoint: str, model_kwargs: dict):
     return model
 
 
+def _patch_moe_experts(model, cfg: dict) -> None:
+    """Quantize Gemma4TextExperts to Linear4bit if present. No-op on non-MoE models.
+
+    If model.moe_cache_dir is set in config, loads pre-built cache from
+    convert_gemma4_moe.py instead of re-quantizing from scratch.
+    """
+    cache_dir = cfg.get("model", {}).get("moe_cache_dir")
+    t = cfg["training"]
+    compute_dtype = torch.bfloat16 if t["bf16"] else torch.float16
+
+    if cache_dir:
+        from moe_quant_patch import load_expert_cache
+        logger.info("Loading MoE expert cache from %s", cache_dir)
+        n = load_expert_cache(model, cache_dir)
+    else:
+        from moe_quant_patch import patch_moe_experts_to_4bit
+        n = patch_moe_experts_to_4bit(model, compute_dtype=compute_dtype)
+
+    if n > 0:
+        _log_quantization_stats(model)
+
+
+def _offload_unused_towers(model) -> None:
+    """Move vision/audio towers to CPU for text-only training."""
+    offloaded = []
+    for attr in ("vision_tower", "audio_tower", "embed_vision"):
+        mod = getattr(model, attr, None)
+        if mod is not None:
+            mod.to("cpu")
+            offloaded.append(attr)
+    if offloaded:
+        logger.info("Offloaded to CPU (text-only SFT): %s", ", ".join(offloaded))
+        torch.cuda.empty_cache()
+
+
+def _log_quantization_stats(model) -> None:
+    try:
+        import bitsandbytes as bnb
+        n_quant = sum(1 for _, m in model.named_modules() if isinstance(m, bnb.nn.Linear4bit))
+        n_linear = sum(1 for _, m in model.named_modules() if isinstance(m, torch.nn.Linear))
+        logger.info("Quantization check: %d Linear4bit, %d nn.Linear", n_quant, n_linear)
+        if n_quant == 0:
+            logger.warning("No Linear4bit layers found -- model may not be 4-bit quantized!")
+    except ImportError:
+        pass
+
+
 def load_model_and_tokenizer(cfg: dict, checkpoint: str | None = None):
     t = cfg["training"]
     full_ft = cfg["_full_finetune"]
@@ -110,6 +157,9 @@ def load_model_and_tokenizer(cfg: dict, checkpoint: str | None = None):
         logger.info("Loading model: %s", model_name)
         model = _load_pretrained(model_name, model_kwargs)
         if not full_ft:
+            _log_quantization_stats(model)
+            _patch_moe_experts(model, cfg)
+            _offload_unused_towers(model)
             model = prepare_model_for_kbit_training(model)
         tokenizer_src = model_name
 
