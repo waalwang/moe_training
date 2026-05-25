@@ -1,28 +1,25 @@
-# MoE Training Config (Gemma 4 26B)
-# ----------------------------------
+# MoE Training Config (Gemma 4 26B MoE -- pre-quantized expert cache)
+# -------------------------------------------------------------------
 
 model:
-  # name: "google/gemma-4-26b-A4B-it"  # MoE -- expert FFN weights unquantizable, needs multi-GPU
-  name: "google/gemma-3-27b-it"
+  name: "google/gemma-4-26b-A4B-it"
+  moe_cache_dir: "./data/moe_cache"  # built by convert_gemma4_moe.py
 
-# QLoRA config -- attention-only targets for MoE backbone.
-# Expert FFN weights are packed nn.Parameters (not nn.Linear), so LoRA
-# cannot target them directly. The shared per-layer MLP (gate_proj etc.)
-# can be added if attention-only underperforms.
+# QLoRA -- Gemma4TextAttention uses plain nn.Linear (not Gemma4ClippableLinear).
+# exclude_modules regex blocks vision/audio tower Gemma4ClippableLinear modules
+# that also have q_proj/k_proj children and would otherwise be matched.
 qlora:
   r: 64
   lora_alpha: 128
   lora_dropout: 0.05
   target_modules:
-    # Gemma4ClippableLinear is only in vision/audio towers.
-    # Gemma4TextAttention uses plain nn.Linear -- no .linear suffix needed.
     - "q_proj"
     - "k_proj"
     - "v_proj"
     - "o_proj"
+  exclude_modules: '.*(vision_tower|audio_tower|embed_vision|embed_audio)\..*'
   task_type: "CAUSAL_LM"
 
-# QLoRA config for DPO (larger rank for preference learning)
 dpo_qlora:
   r: 64
   lora_alpha: 128
@@ -32,9 +29,9 @@ dpo_qlora:
     - "k_proj"
     - "v_proj"
     - "o_proj"
+  exclude_modules: '.*(vision_tower|audio_tower|embed_vision|embed_audio)\..*'
   task_type: "CAUSAL_LM"
 
-# Optional: attention + shared MLP targets (use if attention-only plateaus)
 qlora_with_mlp:
   r: 64
   lora_alpha: 128
@@ -47,6 +44,7 @@ qlora_with_mlp:
     - "gate_proj"
     - "up_proj"
     - "down_proj"
+  exclude_modules: '.*(vision_tower|audio_tower|embed_vision|embed_audio)\..*'
   task_type: "CAUSAL_LM"
 
 data:
@@ -55,15 +53,13 @@ data:
   seed: 42
   min_chain_depth: 3
   min_total_score: 0.0
-  weight_beta: 0 # do a simple sft first
+  weight_beta: 0
   weight_mode: "gate_amplify"
   weight_floor: 0.1
   weight_max: 2.0
 
-# Hardware profiles
 profiles:
   local:
-    # TITAN RTX 24GB -- too small for 26B MoE, eval/prototyping only
     per_device_train_batch_size: 1
     gradient_accumulation_steps: 1
     bf16: false
@@ -74,8 +70,8 @@ profiles:
     max_length: 1024
 
   cloud:
-    # QLoRA gemma-3-27b, RTX PRO 6000 WS 96GB
-    # 27B dense in 4-bit ~ 14GB weights, ~80GB headroom for activations
+    # QLoRA gemma-4-26b-A4B-it, RTX PRO 6000 WS 96GB
+    # Expert FFN in nf4 (cache), attention in 4-bit -- ~15GB weights, ample headroom
     per_device_train_batch_size: 8
     gradient_accumulation_steps: 2
     bf16: true
@@ -86,8 +82,6 @@ profiles:
     max_length: 2048
 
   cloud_full:
-    # Full FT 26B -- needs multi-GPU or very large VRAM
-    # All 26B params + Adam states ~ 200GB+ in bf16
     per_device_train_batch_size: 1
     gradient_accumulation_steps: 16
     bf16: true
@@ -97,7 +91,6 @@ profiles:
     gradient_checkpointing: true
     max_length: 2048
 
-# DPO training
 dpo:
   data_dir: "./data/dpo_pairs.parquet"
   beta: 0.1
@@ -114,11 +107,10 @@ dpo:
   chosen_weighting: false
   weight_beta: 0.3
   weight_mode: "gate_amplify"
-  run_name: "gemma4-26b-dpo"
+  run_name: "gemma4-26b-moe-dpo"
 
-# Weighted SFT training
 training:
-  output_dir: "outputs/sft"
+  output_dir: "outputs/gemma4_sft"
   num_train_epochs: 2
   learning_rate: 1.0e-4
   warmup_ratio: 0.05
@@ -132,5 +124,5 @@ training:
   eval_strategy: "steps"
   save_total_limit: 5
   report_to: "wandb"
-  run_name: "gemma4-26b-sft"
+  run_name: "gemma4-26b-moe-sft"
   dataset_num_proc: 16

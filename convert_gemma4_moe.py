@@ -142,8 +142,27 @@ def load_expert_cache(model, cache_dir: str) -> int:
             layers = nn.ModuleList()
             for e in entries:
                 qs_dict = e["quant_state"]
-                # Reconstruct QuantState from dict.
-                qs = QuantState.from_dict(qs_dict, device=device)
+                # as_dict() returns unpacked format; from_dict() expects packed.
+                # Reconstruct QuantState directly from unpacked components.
+                state2, offset = None, None
+                if "nested_absmax" in qs_dict:
+                    state2 = QuantState(
+                        absmax=qs_dict["nested_absmax"].to(device),
+                        blocksize=qs_dict["nested_blocksize"],
+                        code=qs_dict["nested_quant_map"].to(device),
+                        dtype=getattr(torch, qs_dict["nested_dtype"]),
+                    )
+                    offset = torch.tensor(float(qs_dict["nested_offset"])).to(device)
+                qs = QuantState(
+                    quant_type=qs_dict["quant_type"],
+                    absmax=qs_dict["absmax"].to(device),
+                    blocksize=qs_dict["blocksize"],
+                    code=qs_dict["quant_map"].to(device),
+                    dtype=getattr(torch, qs_dict["dtype"]),
+                    shape=torch.Size(qs_dict["shape"]) if qs_dict["shape"] is not None else None,
+                    offset=offset,
+                    state2=state2,
+                )
                 p = Params4bit(
                     e["weight"].to(device),
                     requires_grad=False,

@@ -41,6 +41,7 @@ def build_lora_config(cfg: dict, section: str = "qlora") -> LoraConfig:
         lora_alpha=qlora["lora_alpha"],
         lora_dropout=qlora["lora_dropout"],
         target_modules=qlora["target_modules"],
+        exclude_modules=qlora.get("exclude_modules"),
         task_type=TaskType.CAUSAL_LM,
         bias="none",
     )
@@ -97,9 +98,12 @@ def _patch_moe_experts(model, cfg: dict) -> None:
 
 def _offload_unused_towers(model) -> None:
     """Move vision/audio towers to CPU for text-only training."""
+    # Gemma4ForConditionalGeneration wraps Gemma4Model under self.model;
+    # vision/audio attributes live there, not on the top-level wrapper.
+    target = getattr(model, "model", model)
     offloaded = []
-    for attr in ("vision_tower", "audio_tower", "embed_vision"):
-        mod = getattr(model, attr, None)
+    for attr in ("vision_tower", "audio_tower", "embed_vision", "embed_audio"):
+        mod = getattr(target, attr, None)
         if mod is not None:
             mod.to("cpu")
             offloaded.append(attr)
