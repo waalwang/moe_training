@@ -120,7 +120,7 @@ def main():
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--profile", default="cloud",
                         choices=["local", "cloud", "cloud_full"])
-    parser.add_argument("--qlora-section", default="qlora",
+    parser.add_argument("--qlora-section", default="qlora_with_mlp",
                         help="Config section for LoRA (qlora, qlora_with_mlp)")
     parser.add_argument("--resume-from-checkpoint", default=None)
     parser.add_argument("--dry-run", action="store_true")
