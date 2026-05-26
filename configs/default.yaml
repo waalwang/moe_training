@@ -1,21 +1,23 @@
-# MoE Training Config (Gemma 4 26B)
-# ----------------------------------
+# SFT/DPO Config -- Gemma 3 27B (dense proxy)
+# -------------------------------------------
+# The Gemma 4 26B MoE target lives in configs/moe.yaml. This dense Gemma 3
+# config is the cheap proxy used to rehearse the recipe (attention-frozen,
+# MLP-only LoRA) before committing the heavier MoE run. Note: Gemma 3's RoPE
+# (linear PI) differs from Gemma 4's, so long-context results do NOT transfer
+# from here -- validate long-context on the MoE itself.
 
 model:
-  # name: "google/gemma-4-26b-A4B-it"  # MoE -- expert FFN weights unquantizable, needs multi-GPU
   name: "google/gemma-3-27b-it"
 
-# QLoRA config -- attention-only targets for MoE backbone.
-# Expert FFN weights are packed nn.Parameters (not nn.Linear), so LoRA
-# cannot target them directly. The shared per-layer MLP (gate_proj etc.)
-# can be added if attention-only underperforms.
+quantization:
+  bits: 4
+
+# Attention-only LoRA.
 qlora:
   r: 64
   lora_alpha: 128
   lora_dropout: 0.05
   target_modules:
-    # Gemma4ClippableLinear is only in vision/audio towers.
-    # Gemma4TextAttention uses plain nn.Linear -- no .linear suffix needed.
     - "q_proj"
     - "k_proj"
     - "v_proj"
@@ -34,10 +36,10 @@ dpo_qlora:
     - "o_proj"
   task_type: "CAUSAL_LM"
 
-# Optional: attention + shared MLP targets (use if attention-only plateaus)
+# Attention + shared MLP targets.
 qlora_with_mlp:
-  r: 64
-  lora_alpha: 128
+  r: 256
+  lora_alpha: 256
   lora_dropout: 0.05
   target_modules:
     - "q_proj"
@@ -47,6 +49,31 @@ qlora_with_mlp:
     - "gate_proj"
     - "up_proj"
     - "down_proj"
+  task_type: "CAUSAL_LM"
+
+# Long-context-preserving: MLP only, attention frozen. Rehearses the MoE
+# recipe (q/k/v/o never updated -> attention + RoPE untouched). Run with
+# --qlora-section qlora_mlp_only.
+qlora_mlp_only:
+  r: 128
+  lora_alpha: 128
+  lora_dropout: 0.05
+  target_modules:
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  exclude_modules: '.*(vision_tower|audio_tower|embed_vision|embed_audio)\..*'
+  task_type: "CAUSAL_LM"
+
+dpo_qlora_mlp_only:
+  r: 128
+  lora_alpha: 128
+  lora_dropout: 0.05
+  target_modules:
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  exclude_modules: '.*(vision_tower|audio_tower|embed_vision|embed_audio)\..*'
   task_type: "CAUSAL_LM"
 
 data:
@@ -63,7 +90,7 @@ data:
 # Hardware profiles
 profiles:
   local:
-    # TITAN RTX 24GB -- too small for 26B MoE, eval/prototyping only
+    # TITAN RTX 24GB -- too small for 27B, eval/prototyping only
     per_device_train_batch_size: 1
     gradient_accumulation_steps: 1
     bf16: false
@@ -75,8 +102,8 @@ profiles:
 
   cloud:
     # QLoRA gemma-3-27b, RTX PRO 6000 WS 96GB
-    # 27B dense in 4-bit ~ 14GB weights, ~80GB headroom for activations
-    per_device_train_batch_size: 8
+    # 27B in 4-bit ~ 14GB weights, ~80GB headroom for activations
+    per_device_train_batch_size: 6
     gradient_accumulation_steps: 2
     bf16: true
     fp16: false
@@ -86,8 +113,8 @@ profiles:
     max_length: 2048
 
   cloud_full:
-    # Full FT 26B -- needs multi-GPU or very large VRAM
-    # All 26B params + Adam states ~ 200GB+ in bf16
+    # Full FT 27B -- needs multi-GPU or very large VRAM
+    # All 27B params + Adam states ~ 200GB+ in bf16
     per_device_train_batch_size: 1
     gradient_accumulation_steps: 16
     bf16: true
@@ -114,23 +141,21 @@ dpo:
   chosen_weighting: false
   weight_beta: 0.3
   weight_mode: "gate_amplify"
-  run_name: "gemma4-26b-dpo"
+  run_name: "gemma3-27b-dpo"
 
 # Weighted SFT training
 training:
-  output_dir: "outputs/sft"
-  num_train_epochs: 2
-  learning_rate: 1.0e-4
-  warmup_ratio: 0.05
+  output_dir: "outputs/gemma3_sft_trial"
+  num_train_epochs: 1
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.03
   weight_decay: 0.01
-  lr_scheduler_type: "cosine_with_restarts"
-  lr_scheduler_kwargs:
-    num_cycles: 3
+  lr_scheduler_type: "cosine"
   logging_steps: 10
   save_steps: 2000
   eval_steps: 2000
   eval_strategy: "steps"
   save_total_limit: 5
   report_to: "wandb"
-  run_name: "gemma4-26b-sft"
+  run_name: "gemma3-27b-sft-test-long-context"
   dataset_num_proc: 16

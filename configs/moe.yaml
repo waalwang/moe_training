@@ -4,6 +4,7 @@
 model:
   name: "google/gemma-4-26b-A4B-it"
   moe_cache_dir: "./data/moe_cache"  # built by convert_gemma4_moe.py
+  is_moe: true  # routes to load_moe_model_and_tokenizer (experts 4-bit, attn+shared-MLP bf16)
 
 # QLoRA -- Gemma4TextAttention uses plain nn.Linear (not Gemma4ClippableLinear).
 # exclude_modules regex blocks vision/audio tower Gemma4ClippableLinear modules
@@ -41,6 +42,34 @@ qlora_with_mlp:
     - "k_proj"
     - "v_proj"
     - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  exclude_modules: '.*(vision_tower|audio_tower|embed_vision|embed_audio)\..*'
+  task_type: "CAUSAL_LM"
+
+# Long-context-preserving: shared per-layer MLP ONLY, attention frozen.
+# gate/up/down_proj match Gemma4TextMLP (nn.Linear, runs on every token); the
+# routed experts use packed Parameters / Linear4bit and are never matched.
+# Leaving q/k/v/o_proj untouched keeps global-attention + RoPE bit-identical,
+# which is what preserves the backbone's long-context performance.
+qlora_mlp_only:
+  r: 128
+  lora_alpha: 128
+  lora_dropout: 0.05
+  target_modules:
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  exclude_modules: '.*(vision_tower|audio_tower|embed_vision|embed_audio)\..*'
+  task_type: "CAUSAL_LM"
+
+# Same MLP-only target for DPO (attunement preference tuning, long-context safe).
+dpo_qlora_mlp_only:
+  r: 128
+  lora_alpha: 128
+  lora_dropout: 0.05
+  target_modules:
     - "gate_proj"
     - "up_proj"
     - "down_proj"

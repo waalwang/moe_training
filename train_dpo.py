@@ -30,7 +30,12 @@ from peft import get_peft_model
 from trl import DPOConfig
 
 from dpo_data_loader import load_from_config
-from model_loader import build_lora_config, load_model_and_tokenizer
+from model_loader import (
+    build_lora_config,
+    load_model_and_tokenizer,
+    load_moe_model_and_tokenizer,
+    log_trainable_parameters,
+)
 from weighted_dpo_trainer import WeightedDPOTrainer
 
 logging.basicConfig(
@@ -134,7 +139,10 @@ def main():
                 if "chosen_weight" in sample:
                     logger.info("  chosen_weight: %.3f", sample["chosen_weight"])
 
-    model, tokenizer = load_model_and_tokenizer(cfg, args.checkpoint)
+    if cfg["model"].get("is_moe") and not full_ft:
+        model, tokenizer = load_moe_model_and_tokenizer(cfg, args.checkpoint)
+    else:
+        model, tokenizer = load_model_and_tokenizer(cfg, args.checkpoint)
 
     if full_ft:
         total = sum(p.numel() for p in model.parameters())
@@ -142,7 +150,7 @@ def main():
     else:
         lora_config = build_lora_config(cfg, section=args.qlora_section)
         model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
+        log_trainable_parameters(model)
 
     if args.dry_run:
         logger.info("Dry run complete.")

@@ -26,12 +26,42 @@ logger = logging.getLogger(__name__)
 
 
 def build_quantization_config(cfg: dict) -> BitsAndBytesConfig:
+    quant_bits = cfg.get("quantization", {}).get("bits", 4)
+    compute_dtype = torch.bfloat16 if cfg["training"]["bf16"] else torch.float16
+
+    if quant_bits == 8:
+        return BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_has_fp16_weight=False,
+        )
+
     return BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16 if cfg["training"]["bf16"] else torch.float16,
+        bnb_4bit_compute_dtype=compute_dtype,
         bnb_4bit_use_double_quant=True,
     )
+
+
+def log_trainable_parameters(model) -> None:
+    """Log trainable/total params and which modules got LoRA adapters.
+
+    Uses the logger (not PEFT's print_trainable_parameters, which writes to
+    stdout and is lost from logger-captured logs). Listing the targeted module
+    suffixes makes it easy to confirm attention (q/k/v/o_proj) is frozen.
+    """
+    trainable, total = 0, 0
+    targeted: set[str] = set()
+    for name, p in model.named_parameters():
+        total += p.numel()
+        if p.requires_grad:
+            trainable += p.numel()
+            if ".lora_" in name:
+                targeted.add(name.split(".lora_")[0].split(".")[-1])
+    pct = 100.0 * trainable / total if total else 0.0
+    logger.info("Trainable params: %s / %s (%.4f%%)", f"{trainable:,}", f"{total:,}", pct)
+    if targeted:
+        logger.info("LoRA adapters on modules: %s", ", ".join(sorted(targeted)))
 
 
 def build_lora_config(cfg: dict, section: str = "qlora") -> LoraConfig:
@@ -115,11 +145,13 @@ def _offload_unused_towers(model) -> None:
 def _log_quantization_stats(model) -> None:
     try:
         import bitsandbytes as bnb
-        n_quant = sum(1 for _, m in model.named_modules() if isinstance(m, bnb.nn.Linear4bit))
+        n_4bit = sum(1 for _, m in model.named_modules() if isinstance(m, bnb.nn.Linear4bit))
+        n_8bit = sum(1 for _, m in model.named_modules() if isinstance(m, bnb.nn.Linear8bitLt))
         n_linear = sum(1 for _, m in model.named_modules() if isinstance(m, torch.nn.Linear))
-        logger.info("Quantization check: %d Linear4bit, %d nn.Linear", n_quant, n_linear)
-        if n_quant == 0:
-            logger.warning("No Linear4bit layers found -- model may not be 4-bit quantized!")
+        logger.info("Quantization check: %d Linear4bit, %d Linear8bit, %d nn.Linear",
+                     n_4bit, n_8bit, n_linear)
+        if n_4bit == 0 and n_8bit == 0:
+            logger.warning("No quantized layers found -- model may not be quantized!")
     except ImportError:
         pass
 
@@ -174,4 +206,81 @@ def load_model_and_tokenizer(cfg: dict, checkpoint: str | None = None):
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
+    return model, tokenizer
+
+
+def _prepare_frozen_base_for_training(model, use_gradient_checkpointing: bool) -> None:
+    """Freeze the base and wire gradient checkpointing WITHOUT fp32 upcasting.
+
+    peft.prepare_model_for_kbit_training is wrong for the MoE path: the base is
+    bf16 (only the experts are 4-bit), so the model is not flagged
+    is_loaded_in_4bit. That path would (1) cast every bf16 weight to fp32,
+    defeating the point of keeping attention/shared-MLP in bf16, and (2) skip
+    the input-require-grads hook, which a frozen base needs under reentrant
+    gradient checkpointing or the adapters get no gradient.
+    """
+    model.config.use_cache = False
+    for p in model.parameters():
+        p.requires_grad_(False)
+    if use_gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        model.enable_input_require_grads()
+
+
+def load_moe_model_and_tokenizer(cfg: dict, checkpoint: str | None = None):
+    """Load a Gemma 4 MoE backbone for QLoRA with long-context preservation.
+
+    Only the routed experts are 4-bit -- they hold the bulk of the 26B params
+    and are not long-context-critical. Attention, the shared per-layer MLP, and
+    the embeddings stay in bf16, so the long-context machinery (global-layer
+    attention + RoPE) is left at full precision. Pair with the qlora_mlp_only
+    LoRA section so the adapter only touches the shared MLP and attention is
+    never updated.
+    """
+    if cfg["_full_finetune"]:
+        raise ValueError(
+            "load_moe_model_and_tokenizer is QLoRA-only; use load_model_and_tokenizer for full FT."
+        )
+
+    t = cfg["training"]
+    compute_dtype = torch.bfloat16 if t["bf16"] else torch.float16
+
+    model_kwargs = {
+        "device_map": "auto",
+        "trust_remote_code": True,
+        "torch_dtype": compute_dtype,  # bf16 base; experts quantized below, no global BnB
+    }
+    attn_impl = t.get("attn_implementation")
+    if attn_impl and attn_impl != "eager":
+        model_kwargs["attn_implementation"] = attn_impl
+
+    model_name = cfg["model"]["name"]
+    logger.info("Loading MoE backbone in %s (experts -> 4-bit, rest bf16): %s", compute_dtype, model_name)
+    model = _load_pretrained(model_name, model_kwargs)
+
+    _patch_moe_experts(model, cfg)  # cache or on-the-fly: experts -> Linear4bit
+
+    from moe_quant_patch import _QuantizedExperts
+    if not any(isinstance(m, _QuantizedExperts) for _, m in model.named_modules()):
+        raise RuntimeError(
+            f"No MoE expert blocks were quantized for {model_name}. "
+            "Check it is a Gemma 4 MoE and model.moe_cache_dir is valid."
+        )
+
+    _offload_unused_towers(model)
+
+    if checkpoint and _is_adapter_checkpoint(checkpoint):
+        logger.info("Merging adapter into bf16 backbone: %s", checkpoint)
+        model = PeftModel.from_pretrained(model, checkpoint).merge_and_unload()
+
+    _prepare_frozen_base_for_training(model, t.get("gradient_checkpointing", True))
+
+    tok_src = checkpoint if (checkpoint and _is_adapter_checkpoint(checkpoint)) else model_name
+    tokenizer = AutoTokenizer.from_pretrained(tok_src, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+
+    logger.info("MoE ready | profile=%s | experts=4bit, attention+shared_MLP=%s",
+                cfg["_profile"], compute_dtype)
     return model, tokenizer
